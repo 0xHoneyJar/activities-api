@@ -53,8 +53,11 @@ export {
 // verify Activity fixture (VB.1) — the `verify` activity authored as DATA
 // (Quest · one-time · reward None; artifact via engine BadgeIssuancePort).
 // A typed constant, NOT a catalog — activities-api is purely event-sourced.
+//
+// F-003 (GATE-SEC-1): only the decoded, branded VERIFY_ACTIVITY (+ its id) is
+// re-exported. The raw pre-decode object is deliberately NOT surfaced here so
+// no caller can build a completion off the unvalidated shape.
 export {
   VERIFY_ACTIVITY,
   VERIFY_ACTIVITY_ID,
-  VERIFY_ACTIVITY_INPUT,
 } from "./fixtures/verify-activity.js";

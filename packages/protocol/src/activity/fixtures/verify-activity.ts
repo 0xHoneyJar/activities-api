@@ -54,8 +54,15 @@ export const VERIFY_ACTIVITY_ID = "act_verify";
  * companion test can feed it through `Schema.decodeUnknownSync(Activity)` and
  * prove it satisfies the sealed schema — the decoded, branded value is
  * {@link VERIFY_ACTIVITY} below.
+ *
+ * F-003 (GATE-SEC-1 hardening): this raw shape is NOT exported across the
+ * package boundary. Only the decoded, branded {@link VERIFY_ACTIVITY} is
+ * importable — so no caller can construct a completion off the *unvalidated*
+ * pre-decode object (which could carry a drifted reward/step). The `__…ForTest`
+ * name + non-re-export from the package barrels keeps it reachable ONLY by the
+ * companion test inside this same package.
  */
-export const VERIFY_ACTIVITY_INPUT = {
+const __VERIFY_ACTIVITY_INPUT_FOR_TEST = {
   id: VERIFY_ACTIVITY_ID,
   // Quest = one-time (period_key: null). Mission would require an ISOWeek
   // period_key (weekly) — deliberately NOT used: verify is one-and-done.
@@ -87,4 +94,15 @@ export const VERIFY_ACTIVITY_INPUT = {
  * fixture is a valid Activity value (it throws at import time if the shape
  * ever drifts out of the sealed schema). Consumers import this typed value.
  */
-export const VERIFY_ACTIVITY: Activity = Schema.decodeUnknownSync(Activity)(VERIFY_ACTIVITY_INPUT);
+export const VERIFY_ACTIVITY: Activity = Schema.decodeUnknownSync(Activity)(
+  __VERIFY_ACTIVITY_INPUT_FOR_TEST,
+);
+
+/**
+ * Package-private re-export of the raw pre-decode shape, for the companion
+ * fixture test ONLY (F-003). The `__…ForTest` prefix + the fact that this is
+ * NOT re-exported from `activity/index.ts` or the package `index.ts` keeps the
+ * unvalidated shape out of every external caller's reach. Do NOT add this to a
+ * barrel — that would re-open the F-003 surface.
+ */
+export { __VERIFY_ACTIVITY_INPUT_FOR_TEST };

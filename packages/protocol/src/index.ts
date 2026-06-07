@@ -130,10 +130,13 @@ export {
 // verify Activity fixture (VB.1) — `verify` authored as DATA (Quest ·
 // one-time · reward None). A typed constant; activities-api is event-sourced
 // with no catalog surface — see verify-activity.ts header for the rationale.
+//
+// F-003 (GATE-SEC-1): the raw pre-decode `VERIFY_ACTIVITY_INPUT` is NO LONGER
+// exported — only the decoded, branded VERIFY_ACTIVITY (+ its stable id) is
+// importable, so a completion can never be built off the unvalidated shape.
 export {
   VERIFY_ACTIVITY,
   VERIFY_ACTIVITY_ID,
-  VERIFY_ACTIVITY_INPUT,
 } from "./activity/index.js";
 
 // Canonical encoding helpers (T1.12 · D14 · §5.3 + §5.8)

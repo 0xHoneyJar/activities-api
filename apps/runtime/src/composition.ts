@@ -12,22 +12,33 @@
  * envelope when no pool is configured — they NEVER crash the process (the
  * inventory-Flip degraded-envelope precedent, SDD §8 + §12.4).
  *
- * Read-only here: the runtime exposes ONLY the query side of each port
- * (getProgress / RewardPort.query / CompletionEventPort.query). Write routes
- * (completion / grant) land behind the G-4 parity gate + GATE-SEC-1 (SDD §13)
- * — they are intentionally NOT wired into this composition.
+ * Read surface: the query side of each port (getProgress / RewardPort.query /
+ * CompletionEventPort.query).
+ *
+ * Write surface (GATE-SEC-1 · VB.3 · now wired): the completion unit-of-work
+ * (`makeActivityCompletion`) bound to the atomic seam + identity resolver +
+ * event-store. The completion ROUTE owns the verdict gate — the grant
+ * machinery here is reachable ONLY downstream of an APPROVED substrate verdict
+ * (apps/runtime/src/routes/writes.ts). Degraded (no DB) → `write: null`.
  */
 
 import { Pool } from "pg";
 
 import {
+  makePostgresAtomicCompletion,
   makePostgresEventStore,
+  makePostgresIdentityResolver,
   makePostgresProgressPort,
   makePostgresRewardPort,
   type PostgresEventStoreHandle,
   type PostgresProgressPortHandle,
   type PostgresRewardPortHandle,
 } from "@0xhoneyjar/freeside-activities-adapters/postgres";
+
+import {
+  type ActivityCompletionHandle,
+  makeActivityCompletion,
+} from "@0xhoneyjar/quests-engine";
 
 /**
  * Resolve the Postgres connection string from the environment, in the
@@ -48,18 +59,42 @@ export interface ActivitiesReadSurface {
   readonly reward: PostgresRewardPortHandle;
 }
 
+/**
+ * The composed WRITE surface (GATE-SEC-1 · VB.3). Exposes the wired completion
+ * unit-of-work — the atomic seam + identity resolver + event-store bound into a
+ * single `complete()`. `null` when no DB is wired (degraded envelope). The
+ * route owns the verdict gate; this surface only carries the grant machinery,
+ * which is reachable ONLY downstream of the route's APPROVED guard.
+ */
+export interface ActivitiesWriteSurface {
+  readonly completion: ActivityCompletionHandle;
+}
+
 export interface Composition {
   /**
    * The read surface, or `null` when no DATABASE_URL is configured. Data
    * routes branch on this: null → degraded envelope; present → live read.
    */
   readonly surface: ActivitiesReadSurface | null;
+  /**
+   * The write surface, or `null` when no DATABASE_URL is configured. The
+   * completion route branches on this: null → degraded; present → live write.
+   */
+  readonly write: ActivitiesWriteSurface | null;
   /** The underlying pool (for graceful shutdown). `null` when degraded. */
   readonly pool: Pool | null;
   /** Which env var supplied the URL, for the degraded-envelope `reason`. */
   readonly source: "TENANT_CUBQUEST_DATABASE_URL" | "DATABASE_URL" | "none";
   /** Close the pool (idempotent). */
   readonly close: () => Promise<void>;
+}
+
+/**
+ * Narrowed Composition the write route consumes. Decouples the route from the
+ * read-surface shape (the route only needs `write`).
+ */
+export interface WriteComposition {
+  readonly write: ActivitiesWriteSurface | null;
 }
 
 /**
@@ -86,6 +121,7 @@ export const buildComposition = (
   if (url === undefined) {
     return {
       surface: null,
+      write: null,
       pool: null,
       source: "none",
       close: async () => {},
@@ -105,8 +141,25 @@ export const buildComposition = (
   const progress = makePostgresProgressPort({ pool: poolLike });
   const reward = makePostgresRewardPort({ pool: poolLike });
 
+  // ── WRITE surface (GATE-SEC-1 · VB.3) ────────────────────────────────────
+  //
+  // The wired completion unit-of-work: the proven atomic seam (CAS append →
+  // reward_grants → apply_resource_mutation in ONE SERIALIZABLE txn) + the
+  // identity resolver + the event-store contract, bound into one `complete()`.
+  // `verifyEventId` stays at its adapter default (true) so the seam re-checks
+  // the route-computed event_id. The route's APPROVED guard sits ABOVE this —
+  // the grant machinery here is unreachable without an APPROVED verdict.
+  const atomic = makePostgresAtomicCompletion({ pool: poolLike });
+  const identityResolver = makePostgresIdentityResolver({ pool: poolLike });
+  const completion = makeActivityCompletion({
+    atomic,
+    identityResolver: identityResolver.port,
+    eventStore: eventStore.contract,
+  });
+
   return {
     surface: { eventStore, progress, reward },
+    write: { completion },
     pool,
     source,
     close: async () => {

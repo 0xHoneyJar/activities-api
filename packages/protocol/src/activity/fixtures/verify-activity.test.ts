@@ -18,11 +18,17 @@ import { Either, Schema } from "effect";
 import { describe, expect, it } from "vitest";
 import { ActivityId } from "../../branded/ActivityId.js";
 import { Activity } from "../Activity.js";
-import { VERIFY_ACTIVITY, VERIFY_ACTIVITY_ID, VERIFY_ACTIVITY_INPUT } from "./verify-activity.js";
+import {
+  VERIFY_ACTIVITY,
+  VERIFY_ACTIVITY_ID,
+  // F-003: the raw pre-decode shape is package-private (NOT re-exported from any
+  // barrel). The companion test reaches it via the relative fixture path only.
+  __VERIFY_ACTIVITY_INPUT_FOR_TEST,
+} from "./verify-activity.js";
 
 describe("verify Activity fixture (VB.1 · authored as data)", () => {
   it("decodes through the real Activity schema", () => {
-    const result = Schema.decodeUnknownEither(Activity)(VERIFY_ACTIVITY_INPUT);
+    const result = Schema.decodeUnknownEither(Activity)(__VERIFY_ACTIVITY_INPUT_FOR_TEST);
     expect(Either.isRight(result)).toBe(true);
   });
 

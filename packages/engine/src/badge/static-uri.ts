@@ -38,6 +38,7 @@ import {
   type PlayerIdentity,
   type BadgeArtifact,
   BadgeURI,
+  RFC3339Date,
 } from "@0xhoneyjar/quests-protocol";
 
 import { BadgeIssuancePort } from "./index.js";
@@ -83,6 +84,18 @@ export const STATIC_BADGE_REGISTRY: Readonly<
  * Resolve a `BadgeArtifact` for a known `badgeId`, or `null` for an unknown
  * one. Pure (modulo the injected `issued_at` clock value). Exposed for
  * focused unit testing without standing up the Layer.
+ *
+ * F-004 (GATE-SEC-1 hardening): `BadgeArtifact.issued_at` is bare
+ * `Schema.String` — the sealed schema does NOT constrain it to RFC3339. The
+ * Layer below calls this with `new Date().toISOString()` (always valid), but
+ * the EXPORTED function previously trusted its caller's `issuedAt` blindly and
+ * would mint an artifact carrying a non-RFC3339 timestamp. Since the
+ * BadgeIssuancePort stays a pure artifact resolver (F-001 — the route owns the
+ * verdict gate, not this port), the right home for the precondition check is
+ * here: `issuedAt` is validated against {@link RFC3339Date} before it lands in
+ * `issued_at`. An invalid timestamp is a caller precondition violation (NOT an
+ * "unknown badge" — that still returns `null`), so it throws with a clear
+ * message rather than silently producing a malformed artifact.
  */
 export const resolveStaticBadge = (
   badgeId: string,
@@ -92,11 +105,16 @@ export const resolveStaticBadge = (
   if (descriptor === undefined) {
     return null;
   }
+  // F-004: validate the caller-supplied timestamp before baking it in. The
+  // decode throws a ParseError (synchronous boundary) on a non-RFC3339 value,
+  // surfacing the precondition violation at the resolver rather than letting a
+  // malformed `issued_at` flow into a "valid" BadgeArtifact downstream.
+  const issued_at = Schema.decodeUnknownSync(RFC3339Date)(issuedAt) as unknown as string;
   return {
     uri: Schema.decodeUnknownSync(BadgeURI)(descriptor.uri),
     generated_format: descriptor.generated_format,
     prompt_seed_used: descriptor.prompt_seed_used,
-    issued_at: issuedAt,
+    issued_at,
   };
 };
 

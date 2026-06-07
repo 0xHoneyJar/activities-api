@@ -65,3 +65,19 @@ export {
   type CompletionOutcome,
   type ResourceTier,
 } from "./complete.js";
+
+// Verify→APPROVED verdict binding (VB.3 · GATE-SEC-1 — the verdict gate)
+export {
+  verifyIdentityProofVerifier,
+  isVerifyStep,
+  VerifyVerifierError,
+  IDENTITY_PROOF_GRADER_SLUG,
+  VERIFY_CURATOR_ID,
+  type AuthenticatedIdentity,
+} from "./verify-verifier.js";
+
+export {
+  evaluateEligibility,
+  resolveStep,
+  EligibilityError,
+} from "./eligibility.js";

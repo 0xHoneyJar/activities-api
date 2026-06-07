@@ -50,17 +50,21 @@
  * (completion / grant) remain absent (G-4 parity gate + GATE-SEC-1).
  */
 
-import { Effect } from "effect";
+import { Effect, Either } from "effect";
 import {
   type ActivityId,
   type EventFilter,
-  type IdentityId,
 } from "@0xhoneyjar/quests-protocol";
 
 import { ok } from "@hyper/core";
 import { identityOf, requireIdentity, route } from "../app";
 import type { Composition } from "../composition";
-import { degraded, degradedRecord, runRead } from "./_shared";
+import {
+  decodeIdentityScope,
+  degraded,
+  degradedRecord,
+  runRead,
+} from "./_shared";
 
 const BUILTIN_KINDS = ["quest", "mission", "badge-claim", "raffle-entry"] as const;
 
@@ -154,10 +158,18 @@ export const activitiesRoute = (composition: Composition) =>
         // Defense-in-depth: requireIdentity should have 401'd already.
         return degradedRecord("unauthenticated");
       }
+      // SCOPE: DECODE the authenticated sub through the SHARED IdentityId
+      // boundary (the same codec the write side keys partitions on) — never an
+      // unchecked `as IdentityId` cast. A non-conforming sub must NEVER widen
+      // the SQL predicate; reject it to a degraded read instead.
+      const identityScope = decodeIdentityScope(identity.identity_id);
+      if (Either.isLeft(identityScope)) {
+        return degradedRecord("authenticated subject is not a conforming IdentityId");
+      }
       const limit = clampedLimit(req);
       const filter: EventFilter = {
         // SCOPE: pin to the authenticated identity — never a query param.
-        identity_id: identity.identity_id as IdentityId,
+        identity_id: identityScope.right,
         limit,
       };
       const activityId = qp(req, "activity_id");
@@ -197,6 +209,11 @@ export const progressRoute = (composition: Composition) =>
       if (identity === undefined) {
         return degradedRecord("unauthenticated");
       }
+      // SCOPE: decode through the shared IdentityId boundary (not a cast).
+      const identityScope = decodeIdentityScope(identity.identity_id);
+      if (Either.isLeft(identityScope)) {
+        return degradedRecord("authenticated subject is not a conforming IdentityId");
+      }
       const activityId = qp(req, "activity_id");
       if (activityId === undefined) {
         return Promise.resolve(
@@ -210,7 +227,7 @@ export const progressRoute = (composition: Composition) =>
         composition.surface.progress.port.getProgress(
           activityId as ActivityId,
           // SCOPE: the authenticated identity, never a caller param.
-          identity.identity_id as IdentityId,
+          identityScope.right,
         ),
         (record) => ({ record, completeness: { status: "full" as const } }),
       );
@@ -237,13 +254,18 @@ export const badgesRoute = (composition: Composition) =>
       if (identity === undefined) {
         return degraded("unauthenticated");
       }
+      // SCOPE: decode through the shared IdentityId boundary (not a cast).
+      const identityScope = decodeIdentityScope(identity.identity_id);
+      if (Either.isLeft(identityScope)) {
+        return degraded("authenticated subject is not a conforming IdentityId");
+      }
       const limit = clampedLimit(req);
       // SCOPE: pin to the authenticated identity. CompletionEventPort.query
       // filters completion events by identity; badge events share the identity
       // field. Surfaced from completions for the identity until the badge
       // projection lands.
       const filter: EventFilter = {
-        identity_id: identity.identity_id as IdentityId,
+        identity_id: identityScope.right,
         limit,
       };
       return runRead(composition.surface.eventStore.port.query(filter), (events) => {

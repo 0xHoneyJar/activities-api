@@ -47,6 +47,7 @@ import {
   progressRoute,
   raffleRoute,
 } from "./routes/reads";
+import { completeRoute } from "./routes/writes";
 
 // ---------------------------------------------------------------------------
 // Composition root — resolve the DB binding from env (NO hardcoding).
@@ -82,6 +83,10 @@ export const app = new Hyper({ name: "activities-api" })
     progressRoute(composition),
     badgesRoute(composition),
     raffleRoute(composition),
+    // WRITE plane (GATE-SEC-1 · VB.3) — the completion route, behind
+    // requireIdentity. The grant path is reachable ONLY through an APPROVED
+    // substrate verdict (see routes/writes.ts header).
+    completeRoute(composition),
   ] as unknown as readonly Route[]);
 
 // ---------------------------------------------------------------------------
