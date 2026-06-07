@@ -22,6 +22,7 @@
     "composite": true,
     "types": ["vitest/globals", "node"],
     "paths": {
+      "@0xhoneyjar/quests-protocol": ["../protocol/src/index.ts"],
       "@0xhoneyjar/freeside-activities-adapters": ["../adapters/src/index.ts"]
     }
   },
