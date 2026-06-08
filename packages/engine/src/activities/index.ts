@@ -81,3 +81,16 @@ export {
   resolveStep,
   EligibilityError,
 } from "./eligibility.js";
+
+// B2 verify-attestation grader (S1.5 · GATE-SEC-1 · §1.11) — the authoritative
+// APPROVED source for a service-attested verify completion. I/O-free: the route
+// resolves the identity-api correlation + injects it (HIGH-740). Standalone —
+// the service route invokes it, NOT the user-JWT eligibility gate.
+export {
+  verifyAttestationVerifier,
+  VerifyAttestation,
+  VerifyAttestationError,
+  attestationIdempotencyKey,
+  VERIFY_ATTESTATION_GRADER_SLUG,
+  DEFAULT_ATTESTATION_FRESHNESS_SECONDS,
+} from "./verify-attestation-verifier.js";

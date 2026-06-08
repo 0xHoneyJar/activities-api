@@ -61,3 +61,13 @@ export {
   VERIFY_ACTIVITY,
   VERIFY_ACTIVITY_ID,
 } from "./fixtures/verify-activity.js";
+
+// B1 donation-raffle Activity (S1.3 · BadgeClaim · one MerkleProof step · reward
+// None). Same F-003 discipline: only the decoded, branded value + its ids are
+// re-exported, never the raw pre-decode shape.
+export {
+  B1_DONATION_RAFFLE_ACTIVITY,
+  B1_DONATION_RAFFLE_ACTIVITY_ID,
+  B1_DONATION_RAFFLE_FAMILY_ID,
+  B1_DONATION_RAFFLE_SNAPSHOT_ID,
+} from "./fixtures/b1-donation-raffle-activity.js";

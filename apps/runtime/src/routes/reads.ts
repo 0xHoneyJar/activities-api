@@ -55,9 +55,11 @@ import {
   type ActivityId,
   type EventFilter,
 } from "@0xhoneyjar/quests-protocol";
+import { projectEarnedBadges, type EarnedBadge } from "@0xhoneyjar/quests-engine";
 
-import { ok } from "@hyper/core";
+import { jsonResponse, ok, type Middleware } from "@hyper/core";
 import { identityOf, requireIdentity, route } from "../app";
+import { serviceScopeOf } from "../auth/require-service-token";
 import type { Composition } from "../composition";
 import {
   decodeIdentityScope,
@@ -68,8 +70,6 @@ import {
 
 const BUILTIN_KINDS = ["quest", "mission", "badge-claim", "raffle-entry"] as const;
 
-const ACTIVITY_COMPLETED_ID =
-  "https://schemas.freeside.thj/activity-completed/v1.0.0";
 const BADGE_ISSUED_ID = "https://schemas.freeside.thj/badge-issued/v1.0.0";
 
 /**
@@ -113,6 +113,43 @@ const pageTail = (
       ? last.event_id
       : null;
   return { next_cursor: cursor, total_count: events.length };
+};
+
+/**
+ * Project a page of raw events into the badge-read body (C4 · S1.6). The
+ * projection collapses the event stream into a deduplicated `EarnedBadge[]`
+ * (one badge per family); `total_count` is the projected badge count for THIS
+ * event window. `next_cursor` pages the underlying EVENT stream (a full event
+ * page ⇒ more events may carry additional families), consistent with the other
+ * read routes' cursor contract. Shared by the self-Bearer `/v1/badges` route
+ * and the service-token `/v1/identities/:id/badges` route so both planes
+ * project identically (one source of truth).
+ *
+ * ⚠ PROD GAP (arrakis-l08n · S3): the Postgres `eventStore.query` hard-codes
+ * `event_envelope->>'$id' = ActivityCompleted` (event-store.ts), so in
+ * production this currently surfaces ONLY B2 verify badges (ActivityCompleted).
+ * `projectEarnedBadges` ALSO handles BadgeIssued (B1 merkle grants), but those
+ * events are filtered out by the query until it is widened — tracked for S3
+ * (B1 bulk-grant), which is also when the first BadgeIssued events exist. The
+ * projection's BadgeIssued branch is correct; the query feeding it is the limit.
+ */
+const badgePage = (
+  events: readonly unknown[],
+  limit: number,
+): {
+  readonly items: readonly EarnedBadge[];
+  readonly next_cursor: string | null;
+  readonly total_count: number;
+  readonly completeness: { readonly status: "full" };
+} => {
+  const badges = projectEarnedBadges(events);
+  const tail = pageTail(events as ReadonlyArray<{ event_id?: unknown }>, limit);
+  return {
+    items: badges,
+    next_cursor: tail.next_cursor,
+    total_count: badges.length,
+    completeness: { status: "full" as const },
+  };
 };
 
 /**
@@ -261,25 +298,88 @@ export const badgesRoute = (composition: Composition) =>
       }
       const limit = clampedLimit(req);
       // SCOPE: pin to the authenticated identity. CompletionEventPort.query
-      // filters completion events by identity; badge events share the identity
-      // field. Surfaced from completions for the identity until the badge
-      // projection lands.
+      // filters events by identity; the projection collapses BadgeIssued +
+      // ActivityCompleted into the deduplicated EarnedBadge[] (S1.6 — kills the
+      // "badge projection pending" stub).
       const filter: EventFilter = {
         identity_id: identityScope.right,
         limit,
       };
-      return runRead(composition.surface.eventStore.port.query(filter), (events) => {
-        const tail = pageTail(events as ReadonlyArray<{ event_id?: unknown }>, limit);
-        return {
-          items: events,
-          next_cursor: tail.next_cursor,
-          total_count: tail.total_count,
-          completeness: {
-            status: "full" as const,
-            note: `badge projection pending; surfaced from ${ACTIVITY_COMPLETED_ID} for identity`,
-          },
-        };
-      });
+      return runRead(composition.surface.eventStore.port.query(filter), (events) =>
+        badgePage(events as readonly unknown[], limit),
+      );
+    });
+
+/**
+ * get-badges-by-identity (C4 · S1.6) — the SERVICE read route. Returns earned
+ * badges for an ARBITRARY identity named in the PATH, gated by the `read`
+ * service token (§1.12; mibera-dimensions holds it). This is the cross-identity
+ * read the self-Bearer `/v1/badges` route deliberately forbids — so it MUST sit
+ * behind the read service token, never the public/self path.
+ *
+ * ── SECURITY (scar) ──────────────────────────────────────────────────────────
+ *   - `readGate` is the per-scope service-token middleware built ONCE in the
+ *     composition root (makeRequireServiceToken(resolveServiceTokenConfig("read"))).
+ *     It accepts ONLY ACTIVITIES_READ_TOKEN — a leaked verify-write token cannot
+ *     satisfy it (the scope is closed over in the gate; §1.12 isolation).
+ *   - `identity_id` is the PATH PARAM, decoded through the REAL IdentityId
+ *     boundary (decodeIdentityScope, NOT a cast). A non-conforming id → degraded
+ *     empty; it NEVER widens the SQL predicate.
+ *   - READ-ONLY: the query side of the event store only; no write surface.
+ */
+export const badgesByIdentityRoute = (
+  composition: Composition,
+  readGate: Middleware,
+) =>
+  route
+    .get("/v1/identities/:identity_id/badges")
+    .use(readGate)
+    .meta({
+      name: "get-badges-by-identity",
+      tags: ["activities"],
+      mcp: {
+        description:
+          "Returns earned badges for an identity (service-token read scope; the " +
+          "mibera-dimensions surface consumer).",
+      },
+    })
+    .handle((ctx: { req: Request; params: unknown }) => {
+      const req = ctx.req;
+      // Defense-in-depth (scar): the read gate must have authenticated the
+      // `read` scope. Unreachable in correct wiring (the gate 401s a
+      // missing/wrong token before the handler runs) — this catches a
+      // composition-root mis-wire (the route built with the WRONG-scope gate)
+      // by failing CLOSED with 401. A wrong/absent service scope is an
+      // AUTHORIZATION failure, NOT a degraded read: a wrong-scope token must
+      // never reach a 200, even an empty one (FAGAN S1.6 finding — a degraded
+      // 200 here would mask the mis-wire as a successful empty read).
+      if (serviceScopeOf(req) !== "read") {
+        return jsonResponse(401, {
+          error: "unauthorized",
+          code: "wrong_service_scope",
+        });
+      }
+      if (composition.surface === null) {
+        return degraded("cubquest-db not bound; badges read unavailable");
+      }
+      const params = (ctx.params ?? {}) as Record<string, string>;
+      const rawIdentityId = params.identity_id ?? "";
+      // SCOPE: decode the PATH PARAM through the shared IdentityId boundary (the
+      // same codec the write side keys partitions on) — never an unchecked cast.
+      // A non-conforming id is rejected to a degraded empty read rather than
+      // widening the predicate.
+      const identityScope = decodeIdentityScope(rawIdentityId);
+      if (Either.isLeft(identityScope)) {
+        return degraded("identity_id path param is not a conforming IdentityId");
+      }
+      const limit = clampedLimit(req);
+      const filter: EventFilter = {
+        identity_id: identityScope.right,
+        limit,
+      };
+      return runRead(composition.surface.eventStore.port.query(filter), (events) =>
+        badgePage(events as readonly unknown[], limit),
+      );
     });
 
 /**

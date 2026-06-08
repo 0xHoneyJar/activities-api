@@ -49,6 +49,15 @@ import {
   verifyIdentityProofVerifier,
   VerifyVerifierError,
 } from "./verify-verifier.js";
+import {
+  isMerkleStep,
+  merkleMembershipVerifier,
+  MerkleVerifierError,
+  type OperatorPubkeys,
+  type ResolvedSnapshot,
+} from "./merkle-membership-verifier.js";
+import type { Hex } from "../badge/merkle.js";
+import type { SnapshotEnvironment } from "../badge/snapshot-sig.js";
 
 /**
  * EligibilityError — sealed (never thrown). Wraps a verifier failure or a
@@ -133,6 +142,20 @@ export const evaluateEligibility = (params: {
   readonly submissionId: string;
   readonly traceId: string;
   readonly gradedAtProvider?: () => string;
+  /**
+   * Bulk-grant context for a `MerkleProof` step (S1.4). Supplied ONLY by the B1
+   * bulk-grant driver (which resolves identity → wallet → proof against the
+   * persisted, signed snapshot); an interactive route never supplies it, so a
+   * MerkleProof step on the interactive path defaults to deny. Absent on the
+   * verify path.
+   */
+  readonly merkleGrant?: {
+    readonly wallet: string;
+    readonly snapshot: ResolvedSnapshot;
+    readonly proof: readonly Hex[];
+    readonly operatorPubkeys: OperatorPubkeys;
+    readonly environmentId: SnapshotEnvironment;
+  };
 }): Effect.Effect<SubstrateStepVerdict, EligibilityError> =>
   Effect.gen(function* () {
     const { activity, stepId, identity, submissionId, traceId, gradedAtProvider } =
@@ -165,6 +188,47 @@ export const evaluateEligibility = (params: {
             submissionId,
             traceId,
             reason: `verify verifier declined: ${e.reason}`,
+            ...(gradedAtProvider !== undefined && { gradedAtProvider }),
+          }),
+        ),
+      );
+    }
+
+    // MerkleProof step → the merkle-membership grader (B1 bulk-grant, S1.4).
+    // APPROVED iff the snapshot's context-bound signature AND the per-identity
+    // membership proof both verify (§1.10). The bulk-grant context is supplied
+    // ONLY by the bulk-grant driver — an interactive route never provides it, so
+    // a MerkleProof step with no context denies (default-deny preserved).
+    if (isMerkleStep(step)) {
+      const merkleGrant = params.merkleGrant;
+      if (merkleGrant === undefined) {
+        return yield* denyVerdict({
+          submissionId,
+          traceId,
+          reason:
+            `MerkleProof step "${stepId}" requires a resolved snapshot + membership ` +
+            `proof (the bulk-grant context); none supplied — defaulting to NEEDS_HUMAN.`,
+          ...(gradedAtProvider !== undefined && { gradedAtProvider }),
+        });
+      }
+      return yield* merkleMembershipVerifier({
+        identity,
+        step,
+        wallet: merkleGrant.wallet,
+        snapshot: merkleGrant.snapshot,
+        proof: merkleGrant.proof,
+        operatorPubkeys: merkleGrant.operatorPubkeys,
+        environmentId: merkleGrant.environmentId,
+        submissionId,
+        traceId,
+        ...(gradedAtProvider !== undefined && { gradedAtProvider }),
+      }).pipe(
+        Effect.catchTag("MerkleVerifierError", (e: MerkleVerifierError) =>
+          // A merkle-grader refusal is a deny (NEEDS_HUMAN), never a crash.
+          denyVerdict({
+            submissionId,
+            traceId,
+            reason: `merkle-membership grader declined: ${e.reason}`,
             ...(gradedAtProvider !== undefined && { gradedAtProvider }),
           }),
         ),

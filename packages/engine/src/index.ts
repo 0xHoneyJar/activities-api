@@ -114,6 +114,14 @@ export {
   type StaticBadgeDescriptor,
 } from "./badge/static-uri.js";
 
+// Badge read projection (C4 · S1.6) — the read plane's badge surface. Projects
+// the event stream (BadgeIssued + ActivityCompleted) into a deduplicated,
+// art-resolved EarnedBadge[]. Consumed by the activities-api read routes.
+export {
+  projectEarnedBadges,
+  type EarnedBadge,
+} from "./badge/badge-projection.js";
+
 // EngineConfig (§4.5) — per-world quest engine configuration
 export {
   EngineConfig,

@@ -139,6 +139,14 @@ export {
   VERIFY_ACTIVITY_ID,
 } from "./activity/index.js";
 
+// B1 donation-raffle Activity (S1.3) — same F-003 discipline as verify.
+export {
+  B1_DONATION_RAFFLE_ACTIVITY,
+  B1_DONATION_RAFFLE_ACTIVITY_ID,
+  B1_DONATION_RAFFLE_FAMILY_ID,
+  B1_DONATION_RAFFLE_SNAPSHOT_ID,
+} from "./activity/index.js";
+
 // Canonical encoding helpers (T1.12 · D14 · §5.3 + §5.8)
 export {
   bigintFromDecimal,
@@ -277,3 +285,22 @@ export type {
   RecordOutcome,
   ReplayStoreError,
 } from "./auth-ports/index.js";
+
+// B1 merkle + snapshot-signature golden vectors — the canonical cross-runtime
+// conformance surface for the B1 crypto (§1.10.3 · S1.2 · CRITICAL-870). The
+// engine grader + any future runtime consume these to prove they reproduce the
+// frozen leaf/root/proof/signature values. (Event golden vectors remain
+// protocol-internal — only the merkle vectors are a cross-package contract.)
+export {
+  B1_MERKLE_GOLDEN,
+  B1_MERKLE_SINGLE_LEAF,
+  B1_STAGING_REPLAY_SIGNATURE,
+  B1_WRONG_SIGNER_PUBKEY,
+  KECCAK256_EMPTY,
+} from "./golden-vectors/merkle.fixtures.js";
+export type {
+  Hex,
+  MerkleGoldenLeaf,
+  MerkleSingleLeafGoldenVector,
+  MerkleSnapshotGoldenVector,
+} from "./golden-vectors/merkle.fixtures.js";
