@@ -22,6 +22,8 @@
  * S1.6 · 2026-06-08 · mibera-badge-surface.
  */
 
+import { createHmac } from "node:crypto";
+
 import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 
@@ -32,7 +34,7 @@ import type { Middleware, Route } from "@hyper/core";
 
 import { makeRequireServiceToken } from "../../auth/require-service-token";
 import type { ActivitiesReadSurface, Composition } from "../../composition";
-import { badgesByIdentityRoute } from "../reads";
+import { badgesByIdentityRoute, badgesRoute } from "../reads";
 
 // ---------------------------------------------------------------------------
 // Event-store query spy + minimal read surface
@@ -308,6 +310,91 @@ describe("GET /identities/:id/badges — (e) degraded (no DB)", () => {
   it("surface null → degraded envelope, 200, empty items", async () => {
     const app = buildApp(compositionWith(null));
     const res = await get(app, "id_alice", READ_TOKEN);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as BadgeBody;
+    expect(body.items).toHaveLength(0);
+    expect(body.completeness.status).toBe("degraded");
+  });
+});
+
+// ===========================================================================
+// SELF-BEARER /v1/badges — projection repoint + identity scoping (S1.7).
+//
+// The existing self route was repointed from the "badge projection pending"
+// stub to the real projection (S1.6). The verify-write JWT secret + issuer are
+// injected by the runtime vitest config (test.env); mint against the SAME
+// values so requireIdentity authenticates.
+// ===========================================================================
+
+const JWT_SECRET = "test-secret-do-not-use-in-prod"; // matches vitest.config env
+const JWT_ISSUER = "identity-api";
+
+const b64url = (s: string | Buffer): string => Buffer.from(s).toString("base64url");
+
+const mintJwt = (claims: Record<string, unknown>): string => {
+  const header = b64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+  const now = Math.floor(Date.now() / 1000);
+  const payload = b64url(
+    JSON.stringify({ iss: JWT_ISSUER, iat: now, exp: now + 3600, ...claims }),
+  );
+  const sig = createHmac("sha256", JWT_SECRET)
+    .update(`${header}.${payload}`)
+    .digest("base64url");
+  return `${header}.${payload}.${sig}`;
+};
+
+const buildSelfApp = (composition: Composition): Hyper => {
+  const app = new Hyper({ name: "reads-self-test" });
+  app.use([badgesRoute(composition)] as unknown as readonly Route[]);
+  return app;
+};
+
+const getSelf = (app: Hyper, token?: string, query = ""): Promise<Response> => {
+  const headers: Record<string, string> = {};
+  if (token !== undefined) headers.authorization = `Bearer ${token}`;
+  return app.fetch(new Request(`http://local/v1/badges${query}`, { headers }));
+};
+
+describe("GET /v1/badges — self-Bearer projection + identity scoping (S1.7)", () => {
+  it("no JWT → 401, query unreached", async () => {
+    const spy: QuerySpy = { calls: [] };
+    const app = buildSelfApp(compositionWith(makeReadSurface([], spy)));
+    const res = await getSelf(app);
+    expect(res.status).toBe(401);
+    expect(spy.calls).toHaveLength(0);
+  });
+
+  it("valid JWT → projected EarnedBadge[] for the authenticated sub (stub gone)", async () => {
+    const app = buildSelfApp(
+      compositionWith(makeReadSurface([badgeIssued(), activityCompleted()])),
+    );
+    const token = mintJwt({ sub: "id_alice", tenant: "mibera" });
+    const res = await getSelf(app, token);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as BadgeBody;
+    expect(body.items.map((b) => b.badge_family_id)).toEqual([
+      "donation-raffle",
+      "verify",
+    ]);
+    // The "badge projection pending" note is gone — it's the real projection.
+    expect(body.completeness.status).toBe("full");
+  });
+
+  it("self path CANNOT cross identities: scoped to the JWT sub, ?identity_id ignored", async () => {
+    const spy: QuerySpy = { calls: [] };
+    const app = buildSelfApp(compositionWith(makeReadSurface([], spy)));
+    const token = mintJwt({ sub: "id_alice", tenant: "mibera" });
+    // Attempt to read id_bob's badges via a query param — it MUST be ignored;
+    // the route scopes to the authenticated sub only.
+    await getSelf(app, token, "?identity_id=id_bob");
+    expect(spy.calls).toHaveLength(1);
+    expect(String(spy.calls[0]?.identity_id)).toBe("id_alice");
+  });
+
+  it("degraded (no DB) → degraded envelope", async () => {
+    const app = buildSelfApp(compositionWith(null));
+    const token = mintJwt({ sub: "id_alice", tenant: "mibera" });
+    const res = await getSelf(app, token);
     expect(res.status).toBe(200);
     const body = (await res.json()) as BadgeBody;
     expect(body.items).toHaveLength(0);
