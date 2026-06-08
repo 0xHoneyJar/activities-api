@@ -74,7 +74,42 @@ export const STATIC_BADGE_REGISTRY: Readonly<
     generated_format: "png",
     prompt_seed_used: "static:verify-badge",
   },
+  // B1 donation-raffle badge family (S1.3). The eligibility + grant path does
+  // NOT depend on this URI (the artifact is the display payoff, resolved at read
+  // time) — TODO(mibera/mint): confirm the real asset URI before go-live; the
+  // host below mirrors the existing verify row's CDN pattern.
+  "donation-raffle": {
+    uri: "https://d163aeqznbc6js.cloudfront.net/images/faucet/badges/donation-raffle.png",
+    generated_format: "png",
+    prompt_seed_used: "static:donation-raffle-badge",
+  },
 };
+
+// ---------------------------------------------------------------------------
+// Activity → badge-family map (S1.3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Maps an `activity_id` to the `badge_family_id` it grants — the bridge between
+ * an event-sourced Activity (which carries no `badge_spec`) and the
+ * {@link STATIC_BADGE_REGISTRY} key the BadgeIssuancePort resolves. Each family
+ * here MUST have a matching registry row above.
+ *
+ * Keys honor the `^act_[a-z0-9]+$` ActivityId pattern; values are the registry
+ * keys (unbranded family strings).
+ */
+export const ACTIVITY_BADGE_FAMILY: Readonly<Record<string, string>> = {
+  act_verify: "verify",
+  act_donationraffle: "donation-raffle",
+};
+
+/**
+ * Resolve the badge family an activity grants, or `null` for an activity with no
+ * mapped family. Pure lookup — the grant path uses it to pick the registry row.
+ */
+export function badgeFamilyForActivity(activityId: string): string | null {
+  return ACTIVITY_BADGE_FAMILY[activityId] ?? null;
+}
 
 // ---------------------------------------------------------------------------
 // Resolution

@@ -27,3 +27,16 @@ export { REWARD_FAILED_VECTORS } from "./reward-failed.fixtures.js";
 export { REWARD_GRANTED_VECTORS } from "./reward-granted.fixtures.js";
 export { REWARD_PENDING_VECTORS } from "./reward-pending.fixtures.js";
 export type { GoldenVector } from "./types.js";
+
+// B1 merkle + snapshot-signature golden vectors (§1.10.3 · S1.2 · CRITICAL-870).
+export {
+  B1_MERKLE_GOLDEN,
+  B1_MERKLE_SINGLE_LEAF,
+  B1_STAGING_REPLAY_SIGNATURE,
+  B1_WRONG_SIGNER_PUBKEY,
+  type Hex,
+  KECCAK256_EMPTY,
+  type MerkleGoldenLeaf,
+  type MerkleSingleLeafGoldenVector,
+  type MerkleSnapshotGoldenVector,
+} from "./merkle.fixtures.js";
