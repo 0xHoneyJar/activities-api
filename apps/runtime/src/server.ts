@@ -37,22 +37,54 @@ import { openapiPlugin, openapiHandlers } from "@hyper/openapi";
 import { route } from "./app";
 import { buildComposition } from "./composition";
 import { checkCapabilities } from "./beacon";
+import {
+  makeRequireServiceToken,
+  resolveServiceTokenConfig,
+} from "./auth/require-service-token";
+import {
+  makeResolveDiscordIdentity,
+  resolveIdentityApiConfig,
+} from "./clients/identity-resolve";
 
 import { makeHealthRoute } from "./routes/health";
 import { beaconRoute } from "./routes/beacon";
 import {
   activitiesRoute,
+  badgesByIdentityRoute,
   badgesRoute,
   kindsRoute,
   progressRoute,
   raffleRoute,
 } from "./routes/reads";
-import { completeRoute } from "./routes/writes";
+import {
+  completeAttestedRoute,
+  completeRoute,
+  parseWorldAllowlist,
+} from "./routes/writes";
 
 // ---------------------------------------------------------------------------
 // Composition root — resolve the DB binding from env (NO hardcoding).
 // ---------------------------------------------------------------------------
 const composition = buildComposition();
+
+// ---------------------------------------------------------------------------
+// Service-token gates (§1.12) — built ONCE from env. The `read` gate (held by
+// mibera-dimensions) accepts ONLY ACTIVITIES_READ_TOKEN; the `verify-write`
+// gate (held by freeside-characters) ONLY ACTIVITIES_VERIFY_WRITE_TOKEN. Neither
+// satisfies the other. Fail-closed if a secret is unset (the route 401s).
+// ---------------------------------------------------------------------------
+const readGate = makeRequireServiceToken(resolveServiceTokenConfig("read"));
+const verifyWriteGate = makeRequireServiceToken(
+  resolveServiceTokenConfig("verify-write"),
+);
+
+// The net-new outbound identity-api resolve client (B2 correlation, §1.11.1) +
+// the §1.11.2 world allowlist. Both fail-closed: no IDENTITY_API_URL → resolve
+// returns null (grader denies); empty allowlist → every world denied.
+const resolveDiscordIdentity = makeResolveDiscordIdentity(
+  resolveIdentityApiConfig(),
+);
+const worldAllowlist = parseWorldAllowlist(process.env.ACTIVITIES_WORLD_ALLOWLIST);
 
 // ---------------------------------------------------------------------------
 // Boot-time beacon capability assertion (G-2 / IMP-011). Observable, not fatal
@@ -82,11 +114,21 @@ export const app = new Hyper({ name: "activities-api" })
     activitiesRoute(composition),
     progressRoute(composition),
     badgesRoute(composition),
+    // Service-token read route (§1.12) — cross-identity badge read for the
+    // mibera-dimensions surface, behind the `read` gate (never the self path).
+    badgesByIdentityRoute(composition, readGate),
     raffleRoute(composition),
     // WRITE plane (GATE-SEC-1 · VB.3) — the completion route, behind
     // requireIdentity. The grant path is reachable ONLY through an APPROVED
     // substrate verdict (see routes/writes.ts header).
     completeRoute(composition),
+    // B2 service-attested completion (S1.5) — verify-write service token +
+    // identity-api correlation + verify-attestation grader → same chokepoint.
+    completeAttestedRoute(composition, {
+      verifyWriteGate,
+      resolveDiscordIdentity,
+      worldAllowlist,
+    }),
   ] as unknown as readonly Route[]);
 
 // ---------------------------------------------------------------------------

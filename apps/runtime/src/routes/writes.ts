@@ -70,11 +70,16 @@ import {
 
 import {
   type ActivityCompletionHandle,
+  attestationIdempotencyKey,
   evaluateEligibility,
+  isVerifyStep,
+  VerifyAttestation,
+  verifyAttestationVerifier,
 } from "@0xhoneyjar/quests-engine";
 
-import { jsonResponse, ok } from "@hyper/core";
+import { jsonResponse, ok, type Middleware } from "@hyper/core";
 import { identityOf, requireIdentity, route } from "../app";
+import { serviceScopeOf } from "../auth/require-service-token";
 import type { WriteComposition } from "../composition";
 import { encodeCompositePartition, runWrite } from "./_shared";
 
@@ -115,6 +120,73 @@ const resolveActivity = (activityId: string): Activity | null =>
  * read plane (reads.ts) consume the SAME join/hash logic (no duplication). See
  * `encodeCompositePartition` for the encoding spec + operator decision #1.
  */
+
+/**
+ * buildCompletionEffect — the SINGLE grant-assembly + chokepoint (GATE-SEC-1).
+ *
+ * BOTH the user-JWT path ({@link completeRoute}) and the B2 service-attested
+ * path ({@link completeAttestedRoute}) reach `completion.complete()` ONLY
+ * through here — there is exactly ONE complete() call site, strictly downstream
+ * of each route's APPROVED guard. It builds the identity-scoped
+ * `ActivityCompleted` event (deterministic nonce + canonical event_id) and
+ * grants atomically + idempotently.
+ *
+ * `identityId` is ALWAYS the schema-decoded IdentityId — each route decodes its
+ * own authority (the JWT sub / the identity-api-resolved id) at the boundary
+ * before calling this, never an unchecked cast. The seam re-verifies the
+ * event_id (verifyEventId default).
+ */
+const buildCompletionEffect = (
+  completion: ActivityCompletionHandle,
+  args: {
+    readonly activity: Activity;
+    readonly activityId: string;
+    readonly identityId: IdentityId;
+    readonly partitionKey: PartitionKey;
+    readonly ts: RFC3339Date;
+    readonly nonce: string;
+    readonly sourceType: string;
+    readonly sourceMetadata: Record<string, unknown>;
+  },
+) =>
+  Effect.gen(function* () {
+    const preimage = {
+      $id: ACTIVITY_COMPLETED_ID,
+      preimage_schema_id: ACTIVITY_COMPLETED_PREIMAGE_ID,
+      ts: args.ts,
+      source_event_hash: null,
+      nonce: args.nonce,
+      schema_version: "1.0.0" as const,
+      activity_id: args.activityId as unknown as ActivityId,
+      identity_id: args.identityId,
+      period_key: args.activity.period_key,
+      step_completions: [],
+      reward_state_id: null,
+    };
+
+    const eventId = (yield* computeEventId(
+      preimage as unknown as Record<string, unknown> & {
+        readonly $id: string;
+        readonly nonce: string | null;
+      },
+    )) as unknown as EventId;
+
+    const event = { ...preimage, event_id: eventId } as unknown as ActivityCompleted;
+
+    // The ONLY grant call site — strictly downstream of each route's APPROVED
+    // guard. The seam appends the event + records the grant atomically and
+    // idempotently (event_id-PK + partition CAS reject replays).
+    return yield* completion.complete({
+      event,
+      reward: args.activity.reward,
+      recipient: args.identityId,
+      partition_key: args.partitionKey,
+      expected_tip_hash: null,
+      sourceType: args.sourceType,
+      sourceId: args.activityId,
+      sourceMetadata: args.sourceMetadata,
+    });
+  });
 
 /**
  * completeRoute — POST /v1/activities/:activity_id/complete
@@ -294,63 +366,284 @@ export const completeRoute = (
         });
       }
 
-      const ts = timestampProvider() as unknown as RFC3339Date;
-      // Deterministic nonce per logical completion — a genuine retry reproduces
-      // the SAME event_id (→ idempotent duplicate-reject), while two distinct
-      // completions differ. `activity-completed` is a MUTATING event so the
-      // nonce is mandatory (compute-event-id.ts · atomic-completion seam).
-      const nonce = `verify:${identityId}:${activityId}:${body.step_id}`;
+      // Build + grant via the SINGLE chokepoint (buildCompletionEffect). The
+      // deterministic nonce makes a genuine retry reproduce the SAME event_id
+      // (→ idempotent duplicate-reject). identityId is the SCHEMA-DECODED sub.
+      const completionEffect = buildCompletionEffect(write.completion, {
+        activity,
+        activityId,
+        identityId,
+        partitionKey,
+        ts: timestampProvider() as unknown as RFC3339Date,
+        nonce: `verify:${identityId}:${activityId}:${body.step_id}`,
+        sourceType: "verify_completion",
+        sourceMetadata: {
+          step_id: body.step_id,
+          world: identity.world,
+          grader_construct_slug: verdict.graderConstructSlug,
+          verdict_trace_id: verdict.traceId,
+        },
+      });
 
-      // Build the preimage (event minus event_id), compute the canonical hash,
-      // then attach it. The seam re-verifies via computeEventId by default.
-      // identity_id is the SCHEMA-DECODED IdentityId (Fix 1) — not a cast.
-      const preimage = {
-        $id: ACTIVITY_COMPLETED_ID,
-        preimage_schema_id: ACTIVITY_COMPLETED_PREIMAGE_ID,
-        ts,
-        source_event_hash: null,
-        nonce,
-        schema_version: "1.0.0" as const,
-        activity_id: activityId as unknown as ActivityId,
-        identity_id: identityId,
-        period_key: activity.period_key,
-        step_completions: [],
-        reward_state_id: null,
-      };
+      return runWrite(completionEffect, (outcome) => ({
+        completed: true,
+        outcome,
+        verdict,
+        completeness: { status: "full" as const },
+      }));
+    });
 
-      const completionEffect = Effect.gen(function* () {
-        const eventId = (yield* computeEventId(
-          preimage as unknown as Record<string, unknown> & {
-            readonly $id: string;
-            readonly nonce: string | null;
-          },
-        )) as unknown as EventId;
+/**
+ * parseWorldAllowlist — parse the §1.11.2 world allowlist from the comma-
+ * separated `ACTIVITIES_WORLD_ALLOWLIST` env (e.g. "mibera"). Trims + drops
+ * empties. An unset/empty env → `[]` → EVERY world is denied (fail-closed): a
+ * misconfigured allowlist refuses ALL attested grants rather than allowing any.
+ */
+export const parseWorldAllowlist = (raw: string | undefined): string[] =>
+  (raw ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
 
-        const event = {
-          ...preimage,
-          event_id: eventId,
-        } as unknown as ActivityCompleted;
+/**
+ * completeAttestedRoute — POST /v1/activities/:activity_id/complete-attested
+ *
+ * The B2 service-attested completion entry (S1.5 · §1.11). freeside-characters
+ * (C6) grants the verify badge AFTER a Discord verify but holds NO user JWT, so
+ * it cannot use the user-JWT path ({@link completeRoute}). Instead it POSTs a
+ * context-bound attestation under the verify-write service token; THIS route
+ * adjudicates it via the {@link verifyAttestationVerifier} grader and — ONLY on
+ * APPROVED — reaches the same grant chokepoint ({@link buildCompletionEffect}).
+ *
+ * ── SECURITY (scar · GATE-SEC-1) ─────────────────────────────────────────────
+ *   - `verifyWriteGate` accepts ONLY ACTIVITIES_VERIFY_WRITE_TOKEN (§1.12).
+ *   - The caller's asserted `identity_id` is NEVER trusted alone: identity-api
+ *     independently confirms discord_user_id ↔ identity (HIGH-740); the route
+ *     performs that resolve I/O (fail-closed → null) and the grader DENIES a
+ *     null/mismatch. The grant recipient is the identity-api-RESOLVED id,
+ *     decoded through the real IdentityId boundary.
+ *   - No body-supplied authority: submissionId/traceId are route-stamped; the
+ *     completion `ts` is derived from the attestation's issued_at and the nonce
+ *     is the server-verified idempotency key (b2:<id>:<event>), so a B2 replay
+ *     reproduces the same event_id (idempotent).
+ *   - DENY (correlation/world/freshness/idempotency/step) → 200 completed:false,
+ *     NO event, NO grant.
+ */
+export const completeAttestedRoute = (
+  composition: WriteComposition,
+  deps: {
+    readonly verifyWriteGate: Middleware;
+    readonly resolveDiscordIdentity: (
+      discordUserId: string,
+    ) => Promise<string | null>;
+    readonly worldAllowlist: readonly string[];
+    /** Injectable freshness clock (epoch ms). Default: wall clock (grader). */
+    readonly nowMsProvider?: () => number;
+    /** Override the freshness window in seconds (tests). Default: grader's 24h. */
+    readonly freshnessSeconds?: number;
+  },
+) =>
+  route
+    .post("/v1/activities/:activity_id/complete-attested")
+    .use(deps.verifyWriteGate)
+    .meta({
+      name: "complete-activity-attested",
+      tags: ["activities"],
+      mcp: {
+        description:
+          "Service-attested completion of the verify activity (verify-write " +
+          "service token). The grant is reachable ONLY through an APPROVED " +
+          "verify-attestation verdict with an identity-api-confirmed correlation.",
+      },
+    })
+    .handle(async (ctx: { req: Request; params: unknown; body: unknown }) => {
+      const req = ctx.req;
 
-        // completion.complete() is the ONLY grant call site — strictly
-        // downstream of the APPROVED guard above. The verify activity's reward
-        // is None → the seam appends the event + records a (zero-delta) grant
-        // atomically and idempotently.
-        return yield* write.completion.complete({
-          event,
-          reward: activity.reward,
-          // FIX-1 — schema-decoded IdentityId (not a cast).
-          recipient: identityId,
-          partition_key: partitionKey,
-          expected_tip_hash: null,
-          sourceType: "verify_completion",
-          sourceId: activityId,
-          sourceMetadata: {
-            step_id: body.step_id,
-            world: identity.world,
-            grader_construct_slug: verdict.graderConstructSlug,
-            verdict_trace_id: verdict.traceId,
+      // Defense-in-depth (scar): fail CLOSED if the verify-write scope was not
+      // authenticated. Unreachable in correct wiring (the gate 401s first);
+      // catches a composition-root mis-wire (wrong-scope gate) with a 401.
+      if (serviceScopeOf(req) !== "verify-write") {
+        return jsonResponse(401, {
+          error: "unauthorized",
+          code: "wrong_service_scope",
+        });
+      }
+
+      const write = composition.write;
+      if (write === null) {
+        return ok({
+          completed: false,
+          reason: "cubquest-db not bound; completion unavailable",
+          completeness: {
+            status: "degraded" as const,
+            reason: "cubquest-db not bound; completion unavailable",
+            fallback_source: "none (cubquest-db not bound)",
           },
         });
+      }
+
+      const params = (ctx.params ?? {}) as Record<string, string>;
+      const activityId = params.activity_id ?? "";
+      // SCOPE (scar · FAGAN S1.5): the attested path is the B2 VERIFY badge
+      // ONLY. Bind it EXPLICITLY to act_verify — independent of the shared
+      // resolveActivity (whose comment foretells a catalog lookup). Without this
+      // bind, once resolveActivity resolves more activities, a Discord-verify
+      // attestation could complete ANY activity that merely contains a verify
+      // step (an attestation-as-completion-oracle). The attestation proves only
+      // Discord verification; it must never grant a non-verify activity.
+      if (activityId !== VERIFY_ACTIVITY_ID) {
+        return jsonResponse(404, {
+          error: "activity_not_found",
+          detail: `complete-attested supports only "${VERIFY_ACTIVITY_ID}"`,
+          completeness: { status: "full" as const },
+        });
+      }
+      const activity = resolveActivity(activityId);
+      if (activity === null) {
+        return jsonResponse(404, {
+          error: "activity_not_found",
+          detail: `no activity "${activityId}"`,
+          completeness: { status: "full" as const },
+        });
+      }
+
+      // The verify step — the ONLY step the attestation grader owns. (The
+      // grader re-checks isVerifyStep; this resolves the step VALUE to grade.)
+      const step = activity.steps.find((s) => isVerifyStep(s));
+      if (step === undefined) {
+        return jsonResponse(404, {
+          error: "no_verify_step",
+          detail: `activity "${activityId}" has no verify step`,
+          completeness: { status: "full" as const },
+        });
+      }
+
+      // F-002: decode the attestation body on the Effect channel (typed 422).
+      const bodyResult = await Effect.runPromiseExit(
+        Schema.decodeUnknown(VerifyAttestation)(ctx.body ?? {}),
+      );
+      if (bodyResult._tag !== "Success") {
+        return jsonResponse(422, {
+          error: "invalid_body",
+          detail: "body must be a valid VerifyAttestation (§1.11)",
+          completeness: { status: "full" as const },
+        });
+      }
+      const attestation = bodyResult.value;
+
+      // CORRELATION (HIGH-740) — the net-new outbound call. Fail-closed: any
+      // error / 404 / malformed → null → the grader DENIES. The route NEVER
+      // trusts the caller's identity_id without this independent confirmation.
+      const resolvedIdentityId = await deps.resolveDiscordIdentity(
+        attestation.discord_user_id,
+      );
+
+      // Route-stamped, deterministic ids — NEVER body-supplied authority.
+      const submissionId = attestationIdempotencyKey(attestation);
+      const traceId = `b2-attest:${submissionId}`;
+
+      // ── THE GATE ──────────────────────────────────────────────────────────
+      // The attestation grader. A deny is a sealed VerifyAttestationError →
+      // mapped to completed:false (NO grant). Success → an APPROVED verdict.
+      const graded = await Effect.runPromise(
+        verifyAttestationVerifier({
+          attestation,
+          resolvedIdentityId,
+          step,
+          worldAllowlist: deps.worldAllowlist,
+          submissionId,
+          traceId,
+          ...(deps.nowMsProvider !== undefined && {
+            nowMsProvider: deps.nowMsProvider,
+          }),
+          ...(deps.freshnessSeconds !== undefined && {
+            freshnessSeconds: deps.freshnessSeconds,
+          }),
+        }).pipe(
+          Effect.map((verdict) => ({ approved: true as const, verdict })),
+          Effect.catchAll((err) =>
+            Effect.succeed({ approved: false as const, reason: err.reason }),
+          ),
+        ),
+      );
+
+      // ── THE VERIFICATION-INTEGRITY INVARIANT ────────────────────────────
+      // A deny returns HERE — before any event is constructed and before
+      // buildCompletionEffect (the grant chokepoint) is reachable.
+      if (!graded.approved) {
+        return ok({
+          completed: false,
+          reason: graded.reason,
+          completeness: { status: "full" as const },
+        });
+      }
+      const verdict = graded.verdict;
+
+      // ── APPROVED — and ONLY now. ────────────────────────────────────────
+      // GRANT to the identity-api-RESOLVED id (the authority), decoded through
+      // the real IdentityId boundary (not a cast). resolvedIdentityId is
+      // non-null here (the grader denies a null/mismatch), but the decode
+      // defends against a resolved value that is not a conforming IdentityId.
+      const identityIdResult = await Effect.runPromiseExit(
+        Schema.decodeUnknown(IdentityId)(resolvedIdentityId ?? ""),
+      );
+      if (identityIdResult._tag !== "Success") {
+        return jsonResponse(422, {
+          error: "invalid_identity",
+          detail: "identity-api resolved a non-conforming IdentityId",
+          completeness: { status: "full" as const },
+        });
+      }
+      const identityId: IdentityId = identityIdResult.value;
+
+      const periodKeyStr =
+        activity.period_key === null ? null : String(activity.period_key);
+      let partitionKey: PartitionKey;
+      try {
+        partitionKey = await encodeCompositePartition(
+          identityId,
+          activityId,
+          step.step_id,
+          periodKeyStr,
+        );
+      } catch {
+        return jsonResponse(422, {
+          error: "invalid_partition",
+          detail: "could not encode a conforming composite partition key",
+          completeness: { status: "full" as const },
+        });
+      }
+
+      // Deterministic completion ts from the attestation's issued_at → a B2
+      // replay reproduces the SAME event_id (idempotent). issued_at is
+      // parseable here (the grader denied a non-parseable one); guard anyway.
+      const issuedMs = Date.parse(attestation.issued_at);
+      if (!Number.isFinite(issuedMs)) {
+        return jsonResponse(422, {
+          error: "invalid_issued_at",
+          detail: "attestation issued_at is not a parseable timestamp",
+          completeness: { status: "full" as const },
+        });
+      }
+      const ts = new Date(issuedMs).toISOString() as unknown as RFC3339Date;
+
+      const completionEffect = buildCompletionEffect(write.completion, {
+        activity,
+        activityId,
+        identityId,
+        partitionKey,
+        ts,
+        // B2 idempotency anchor (§5.2.1): the server-verified idempotency key.
+        nonce: attestation.idempotency_key,
+        sourceType: "verify_attestation",
+        sourceMetadata: {
+          step_id: step.step_id,
+          world: attestation.world,
+          discord_user_id: attestation.discord_user_id,
+          verify_event_id: attestation.verify_event_id,
+          grader_construct_slug: verdict.graderConstructSlug,
+          verdict_trace_id: verdict.traceId,
+        },
       });
 
       return runWrite(completionEffect, (outcome) => ({
