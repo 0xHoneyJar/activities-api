@@ -124,6 +124,14 @@ const pageTail = (
  * read routes' cursor contract. Shared by the self-Bearer `/v1/badges` route
  * and the service-token `/v1/identities/:id/badges` route so both planes
  * project identically (one source of truth).
+ *
+ * ⚠ PROD GAP (arrakis-l08n · S3): the Postgres `eventStore.query` hard-codes
+ * `event_envelope->>'$id' = ActivityCompleted` (event-store.ts), so in
+ * production this currently surfaces ONLY B2 verify badges (ActivityCompleted).
+ * `projectEarnedBadges` ALSO handles BadgeIssued (B1 merkle grants), but those
+ * events are filtered out by the query until it is widened — tracked for S3
+ * (B1 bulk-grant), which is also when the first BadgeIssued events exist. The
+ * projection's BadgeIssued branch is correct; the query feeding it is the limit.
  */
 const badgePage = (
   events: readonly unknown[],
