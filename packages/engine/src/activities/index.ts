@@ -54,6 +54,7 @@ export {
   translateResourceReward,
   CompletionGranted,
   CompletionDeferred,
+  CompletionRecorded,
   UnknownResourceKind,
   IdentityResolutionFailed,
   AtomicGrantFailed,

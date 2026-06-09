@@ -184,7 +184,27 @@ export class CompletionDeferred extends Data.TaggedClass("CompletionDeferred")<{
   readonly reason: string;
 }> {}
 
-export type CompletionOutcome = CompletionGranted | CompletionDeferred;
+/**
+ * CompletionRecorded — an OFF-CHAIN completion (reward None / "completion is the
+ * reward", CL-Reward-1). The `ActivityCompleted` event is appended to the
+ * identity partition and THAT is the whole grant — no ledger mutation, no chain
+ * address resolved, no RewardPendingEvent. This is the off-chain-first badge
+ * path: a commemorative badge has no economic value, so it must NOT require the
+ * recipient to be resolvable to a chain address (the identity resolver is for
+ * ledger-addressed rewards only). The read plane surfaces it by querying the
+ * partition's ActivityCompleted events — identical to how a granted badge reads.
+ */
+export class CompletionRecorded extends Data.TaggedClass("CompletionRecorded")<{
+  /** event_id of the appended ActivityCompleted (the badge itself). */
+  readonly completionEventId: EventId;
+  /** The recipient the badge was recorded for (substrate-opaque identity). */
+  readonly recipient: IdentityId;
+}> {}
+
+export type CompletionOutcome =
+  | CompletionGranted
+  | CompletionDeferred
+  | CompletionRecorded;
 
 /* ── Errors (sealed; never thrown) ─────────────────────────────────────────── */
 
@@ -415,6 +435,39 @@ export const makeActivityCompletion = (
     });
 
   /**
+   * The OFF-CHAIN path: append ONLY the ActivityCompleted event to the identity
+   * partition. No identity→address resolution, no ledger mutation, no pending
+   * event. For reward None ("completion is the reward", CL-Reward-1) — a
+   * commemorative/off-chain badge whose value IS the durable completion event.
+   *
+   * A no-economic-value badge must NOT require the recipient to be resolvable to
+   * a chain address (the identity resolver exists for ledger-addressed rewards;
+   * forcing it here makes off-chain badges un-grantable for any identity not yet
+   * bound to a chain address — see complete.ts §reward dispatch). The read plane
+   * reads this back by querying the partition's ActivityCompleted events.
+   */
+  const completeOffChain = (
+    input: CompleteActivityInput,
+  ): Effect.Effect<CompletionRecorded, CompletionError> =>
+    Effect.gen(function* () {
+      yield* eventStore
+        .append(input.event as unknown as EventEnvelope, {
+          partition_key: input.partition_key,
+          expected_tip_hash: input.expected_tip_hash,
+        })
+        .pipe(
+          Effect.mapError(
+            (cause): CompletionError =>
+              new DeferredRecordingFailed({ stage: "append-completion", cause }),
+          ),
+        );
+      return new CompletionRecorded({
+        completionEventId: input.event.event_id as unknown as EventId,
+        recipient: input.recipient,
+      });
+    });
+
+  /**
    * The WIRED path: resolve recipient → ledger address (BEFORE the txn),
    * translate the reward → delta, call grantAndComplete atomically.
    */
@@ -498,16 +551,17 @@ export const makeActivityCompletion = (
           return yield* grantResource(input, delta);
         }
         case "None": {
-          // "Completion is the reward" (CL-Reward-1). Route through the atomic
-          // seam with a zero delta — the proc no-ops, but the event appends and a
-          // grant row is recorded. No identity resolution needed for the ledger,
-          // but the seam still wants a userAddress; resolve it (cheap, and keeps
-          // the grant row's recipient consistent with the resource path).
-          return yield* grantResource(input, {
-            common: 0,
-            rare: 0,
-            legendary: 0,
-          });
+          // "Completion is the reward" (CL-Reward-1) — an OFF-CHAIN badge. The
+          // completion event IS the grant; there is no ledger delta to apply, so
+          // there is nothing to address. Route through completeOffChain, which
+          // appends the ActivityCompleted event and resolves NO chain address.
+          //
+          // (Pre-2026-06-08 this routed through grantResource with a zero delta,
+          // which forced identity→address resolution for a no-value badge — so an
+          // off-chain badge was un-grantable for any identity not bound to a chain
+          // address. The zero-delta ledger op was a no-op anyway; the only effect
+          // of the old path was the spurious resolution requirement.)
+          return yield* completeOffChain(input);
         }
         case "BadgeMint":
           // Forwards to the future freeside-mint sibling — delivery NOT wired.

@@ -744,15 +744,19 @@ describe("G-4 parity · INV-6 deferred/None variants don't grant (conservation h
       expect(rBadge.right._tag).toBe("CompletionDeferred");
     }
 
-    // None → "completion is the reward": routed through the atomic seam with a
-    // {0,0,0} delta. The proc no-ops (NO ledger row), but a grant row IS recorded
-    // and the event appends.
+    // None → "completion is the reward": OFF-CHAIN path (2026-06-08). The
+    // ActivityCompleted event appends to the identity partition and THAT is the
+    // grant — NO identity→address resolution, NO ledger op, NO grant row, NO
+    // pending event. (Pre-2026-06-08 this routed through the atomic seam with a
+    // {0,0,0} delta and recorded a spurious zero-delta grant row + forced address
+    // resolution; an off-chain badge needs neither.)
     const rNone = await replay(handle, none);
     expect(rNone._tag).toBe("Right");
     if (Either.isRight(rNone)) {
-      expect(rNone.right._tag).toBe("CompletionGranted");
-      if (rNone.right._tag === "CompletionGranted") {
-        expect(rNone.right.delta).toEqual({ common: 0, rare: 0, legendary: 0 });
+      expect(rNone.right._tag).toBe("CompletionRecorded");
+      if (rNone.right._tag === "CompletionRecorded") {
+        expect(rNone.right.recipient).toBe(none.recipient);
+        expect(String(rNone.right.completionEventId)).toHaveLength(64); // sha256 hex
       }
     }
 
@@ -763,9 +767,10 @@ describe("G-4 parity · INV-6 deferred/None variants don't grant (conservation h
     expect(await balanceOf(pool, badge.userAddress)).toEqual(ZERO);
     expect(await balanceOf(pool, none.userAddress)).toEqual(ZERO);
 
-    // BadgeMint records NO grant row; None DOES record a grant row (zero-delta).
+    // NEITHER BadgeMint NOR None records a grant row: BadgeMint defers (pending),
+    // None completes off-chain (event only). The grant table stays empty.
     const grants = await grantCount(pool);
-    expect(grants).toBe(1); // only the None completion's grant row.
+    expect(grants).toBe(0);
 
     // The BadgeMint completion's partition has TWO events (ActivityCompleted +
     // RewardPending) — query by the completion's ACTUAL (identity-scoped composite)
