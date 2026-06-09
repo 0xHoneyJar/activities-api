@@ -83,14 +83,16 @@ export const STATIC_BADGE_REGISTRY: Readonly<
     generated_format: "png",
     prompt_seed_used: "static:donation-raffle-badge",
   },
-  // First Light — the BM-fam working-group founding badge (category: contribution,
-  // first of its kind; see loa-freeside grimoires/loa/context/first-light-badge-event.md).
-  // SOVEREIGN art: uploaded to thj-assets S3 + served via CloudFront at
-  // assets.0xhoneyjar.xyz — our own infra (NOT the legacy d163 faucet host).
-  "first-light": {
-    uri: "https://assets.0xhoneyjar.xyz/mibera/badges/first-light.png",
+  // Kindling — the raffle-donation badge (category: contribution, first of its
+  // kind). Recognizes donating a Mibera to AMY's raffle of 14 to restart
+  // awareness + distribution; what you give to relight the fire. The internal
+  // activity id stays `act_firstlight` (grants reference it); only the DISPLAY
+  // family + art are "kindling". SOVEREIGN art: thj-assets S3 via CloudFront at
+  // assets.0xhoneyjar.xyz (our own infra, NOT the legacy d163 faucet host).
+  kindling: {
+    uri: "https://assets.0xhoneyjar.xyz/mibera/badges/kindling.png",
     generated_format: "png",
-    prompt_seed_used: "static:first-light-badge",
+    prompt_seed_used: "static:kindling-badge",
   },
 };
 
@@ -110,7 +112,7 @@ export const STATIC_BADGE_REGISTRY: Readonly<
 export const ACTIVITY_BADGE_FAMILY: Readonly<Record<string, string>> = {
   act_verify: "verify",
   act_donationraffle: "donation-raffle",
-  act_firstlight: "first-light",
+  act_firstlight: "kindling",
 };
 
 /**

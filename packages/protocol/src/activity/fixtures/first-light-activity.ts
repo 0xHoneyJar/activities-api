@@ -12,7 +12,8 @@
  *   - steps  = one ManualCurator step (curator_id "first-light" — the
  *              first-light-admin grader owns it; default-deny elsewhere)
  *   - reward = None           → "completion IS the badge"; art resolved at read
- *              time from STATIC_BADGE_REGISTRY["first-light"] (sovereign CDN)
+ *              time from STATIC_BADGE_REGISTRY["kindling"] (the display family
+ *              act_firstlight maps to; sovereign CDN)
  *
  * F-003 (GATE-SEC-1): only the decoded, branded {@link FIRST_LIGHT_ACTIVITY} is
  * exported across the package barrel — the raw pre-decode shape stays
