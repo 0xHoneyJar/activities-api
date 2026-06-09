@@ -147,6 +147,12 @@ export {
   B1_DONATION_RAFFLE_SNAPSHOT_ID,
 } from "./activity/index.js";
 
+// First Light Activity — operator-attested founding-cohort grant (admin-graded).
+export {
+  FIRST_LIGHT_ACTIVITY,
+  FIRST_LIGHT_ACTIVITY_ID,
+} from "./activity/index.js";
+
 // Canonical encoding helpers (T1.12 · D14 · §5.3 + §5.8)
 export {
   bigintFromDecimal,

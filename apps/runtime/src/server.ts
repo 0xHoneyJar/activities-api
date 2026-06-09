@@ -57,6 +57,7 @@ import {
   raffleRoute,
 } from "./routes/reads";
 import {
+  completeAdminRoute,
   completeAttestedRoute,
   completeRoute,
   parseWorldAllowlist,
@@ -76,6 +77,11 @@ const composition = buildComposition();
 const readGate = makeRequireServiceToken(resolveServiceTokenConfig("read"));
 const verifyWriteGate = makeRequireServiceToken(
   resolveServiceTokenConfig("verify-write"),
+);
+// admin-grant gate (operator-held; the most privileged scope) — First Light
+// founding grants. Fail-closed if ACTIVITIES_ADMIN_GRANT_TOKEN is unset.
+const adminGate = makeRequireServiceToken(
+  resolveServiceTokenConfig("admin-grant"),
 );
 
 // The net-new outbound identity-api resolve client (B2 correlation, §1.11.1) +
@@ -129,6 +135,9 @@ export const app = new Hyper({ name: "activities-api" })
       resolveDiscordIdentity,
       worldAllowlist,
     }),
+    // First Light admin grant — operator-attested founding-cohort badge, behind
+    // the admin-grant gate (operator-held). Bound to act_firstlight.
+    completeAdminRoute(composition, { adminGate }),
   ] as unknown as readonly Route[]);
 
 // ---------------------------------------------------------------------------

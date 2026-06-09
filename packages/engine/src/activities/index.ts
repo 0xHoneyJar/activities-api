@@ -94,3 +94,12 @@ export {
   VERIFY_ATTESTATION_GRADER_SLUG,
   DEFAULT_ATTESTATION_FRESHNESS_SECONDS,
 } from "./verify-attestation-verifier.js";
+
+// First Light admin grader (operator-attested founding grant; GATE-SEC-1).
+export {
+  firstLightAdminVerifier,
+  isFirstLightStep,
+  FirstLightAdminError,
+  FIRST_LIGHT_GRADER_SLUG,
+  FIRST_LIGHT_CURATOR_ID,
+} from "./first-light-admin-verifier.js";
