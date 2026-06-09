@@ -71,3 +71,9 @@ export {
   B1_DONATION_RAFFLE_FAMILY_ID,
   B1_DONATION_RAFFLE_SNAPSHOT_ID,
 } from "./fixtures/b1-donation-raffle-activity.js";
+
+// First Light Activity — operator-attested founding-cohort grant (admin-graded).
+export {
+  FIRST_LIGHT_ACTIVITY,
+  FIRST_LIGHT_ACTIVITY_ID,
+} from "./fixtures/first-light-activity.js";

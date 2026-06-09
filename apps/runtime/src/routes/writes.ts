@@ -64,6 +64,8 @@ import {
   IdentityId,
   type PartitionKey,
   type RFC3339Date,
+  FIRST_LIGHT_ACTIVITY,
+  FIRST_LIGHT_ACTIVITY_ID,
   VERIFY_ACTIVITY,
   VERIFY_ACTIVITY_ID,
 } from "@0xhoneyjar/quests-protocol";
@@ -72,6 +74,8 @@ import {
   type ActivityCompletionHandle,
   attestationIdempotencyKey,
   evaluateEligibility,
+  firstLightAdminVerifier,
+  isFirstLightStep,
   isVerifyStep,
   VerifyAttestation,
   verifyAttestationVerifier,
@@ -641,6 +645,217 @@ export const completeAttestedRoute = (
           world: attestation.world,
           discord_user_id: attestation.discord_user_id,
           verify_event_id: attestation.verify_event_id,
+          grader_construct_slug: verdict.graderConstructSlug,
+          verdict_trace_id: verdict.traceId,
+        },
+      });
+
+      return runWrite(completionEffect, (outcome) => ({
+        completed: true,
+        outcome,
+        verdict,
+        completeness: { status: "full" as const },
+      }));
+    });
+
+/**
+ * AdminGrantRequest — the First Light admin-grant body. The operator hand-picks
+ * the recipient (`identity_id`) + their founding weight. `weight` (1=supporting,
+ * 2=founding) is RECORDED as metadata, never power (Gygax × Arcade decision).
+ * `cohort` lets the reusable family date each founding moment.
+ */
+const AdminGrantRequest = Schema.Struct({
+  identity_id: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(256)),
+  weight: Schema.optional(Schema.Number.pipe(Schema.int(), Schema.between(1, 2))),
+  cohort: Schema.optional(
+    Schema.String.pipe(Schema.minLength(1), Schema.maxLength(128)),
+  ),
+});
+
+/**
+ * completeAdminRoute — POST /v1/activities/:activity_id/complete-admin
+ *
+ * The operator-attested First Light grant (mirrors {@link completeAttestedRoute}
+ * but operator-authority, no self-proof/correlation). The OPERATOR hand-picks
+ * the founding cohort; the `admin-grant` service token (§1.12) IS the authority.
+ * Bound to `act_firstlight`. Grants an ActivityCompleted (read-plane-surfaced).
+ *
+ * ── SECURITY (scar · GATE-SEC-1) ─────────────────────────────────────────────
+ *   - `adminGate` accepts ONLY ACTIVITIES_ADMIN_GRANT_TOKEN (operator-held; the
+ *     most privileged scope — neither read nor verify-write can satisfy it).
+ *   - the recipient `identity_id` is operator-supplied (the operator IS the
+ *     authority for WHO) but decoded through the real IdentityId boundary before
+ *     the grant — a non-conforming id → 422, never reaches complete().
+ *   - the grant reaches complete() ONLY through the firstLightAdminVerifier
+ *     APPROVED guard + the single buildCompletionEffect chokepoint.
+ *   - weight is metadata only (founding=2 / supporting=1) — never power/score.
+ *   - idempotent: nonce = `firstlight:<identityId>` → one First Light per
+ *     identity (a re-grant hits the partition CAS / event_id-PK → no double grant).
+ */
+export const completeAdminRoute = (
+  composition: WriteComposition,
+  deps: { readonly adminGate: Middleware },
+) =>
+  route
+    .post("/v1/activities/:activity_id/complete-admin")
+    .use(deps.adminGate)
+    .meta({
+      name: "complete-activity-admin",
+      tags: ["activities"],
+      mcp: {
+        description:
+          "Operator-attested First Light grant (admin-grant service token). The " +
+          "grant is reachable ONLY through an APPROVED first-light-admin verdict.",
+      },
+    })
+    .handle(async (ctx: { req: Request; params: unknown; body: unknown }) => {
+      const req = ctx.req;
+
+      // Defense-in-depth (scar): fail CLOSED if the admin-grant scope was not
+      // authenticated (catches a composition-root mis-wire with a wrong gate).
+      if (serviceScopeOf(req) !== "admin-grant") {
+        return jsonResponse(401, {
+          error: "unauthorized",
+          code: "wrong_service_scope",
+        });
+      }
+
+      const params = (ctx.params ?? {}) as Record<string, string>;
+      const activityId = params.activity_id ?? "";
+      // SCOPE (scar · FAGAN CRITICAL): the admin grant is First Light ONLY. Bind
+      // here + resolve FIRST_LIGHT_ACTIVITY DIRECTLY — it is deliberately NOT in
+      // the shared `resolveActivity`, so the lower-privilege JWT (completeRoute)
+      // and verify-write (completeAttestedRoute) paths can NEVER resolve (let
+      // alone grant) act_firstlight. Checked BEFORE the degraded-DB branch so a
+      // wrong activity_id fails closed (404) regardless of persistence state.
+      if (activityId !== FIRST_LIGHT_ACTIVITY_ID) {
+        return jsonResponse(404, {
+          error: "activity_not_found",
+          detail: `complete-admin supports only "${FIRST_LIGHT_ACTIVITY_ID}"`,
+          completeness: { status: "full" as const },
+        });
+      }
+      const activity = FIRST_LIGHT_ACTIVITY;
+
+      const step = activity.steps.find((s) => isFirstLightStep(s));
+      if (step === undefined) {
+        return jsonResponse(404, {
+          error: "no_firstlight_step",
+          detail: `activity "${activityId}" has no first-light step`,
+          completeness: { status: "full" as const },
+        });
+      }
+
+      // F-002: decode the body on the Effect channel (typed 422).
+      const bodyResult = await Effect.runPromiseExit(
+        Schema.decodeUnknown(AdminGrantRequest)(ctx.body ?? {}),
+      );
+      if (bodyResult._tag !== "Success") {
+        return jsonResponse(422, {
+          error: "invalid_body",
+          detail: "body must be { identity_id: string, weight?: 1|2, cohort?: string }",
+          completeness: { status: "full" as const },
+        });
+      }
+      const grant = bodyResult.value;
+      const weight = grant.weight ?? 1;
+      const cohort = grant.cohort ?? "bm-fam-working-group";
+
+      // DECODE-AT-BOUNDARY: the operator-supplied recipient through the real
+      // IdentityId schema (validate, not trust-widen). A non-conforming id → 422,
+      // never reaches the grant path.
+      const identityIdResult = await Effect.runPromiseExit(
+        Schema.decodeUnknown(IdentityId)(grant.identity_id),
+      );
+      if (identityIdResult._tag !== "Success") {
+        return jsonResponse(422, {
+          error: "invalid_identity",
+          detail: "recipient identity_id is not a conforming IdentityId",
+          completeness: { status: "full" as const },
+        });
+      }
+      const identityId: IdentityId = identityIdResult.value;
+
+      // Degraded AFTER validation (scar · FAGAN): a malformed request (wrong
+      // activity / body / identity) 422s/404s regardless of DB state; only a
+      // VALID request during a DB outage gets a degraded completed:false. No
+      // grant is reachable here (the write surface is null).
+      const write = composition.write;
+      if (write === null) {
+        return ok({
+          completed: false,
+          reason: "cubquest-db not bound; completion unavailable",
+          completeness: {
+            status: "degraded" as const,
+            reason: "cubquest-db not bound; completion unavailable",
+            fallback_source: "none (cubquest-db not bound)",
+          },
+        });
+      }
+
+      // Route-stamped ids (deterministic; never body-supplied authority).
+      const submissionId = `firstlight:${identityId}`;
+      const traceId = `admin-grant:${submissionId}`;
+
+      // ── THE GATE ──────────────────────────────────────────────────────────
+      // The admin grader. A deny (non-first-light step / schema drift) → sealed
+      // FirstLightAdminError → completed:false (NO grant). Success → APPROVED.
+      const graded = await Effect.runPromise(
+        firstLightAdminVerifier({
+          step,
+          recipientId: identityId,
+          weight,
+          submissionId,
+          traceId,
+        }).pipe(
+          Effect.map((verdict) => ({ approved: true as const, verdict })),
+          Effect.catchAll((err) =>
+            Effect.succeed({ approved: false as const, reason: err.reason }),
+          ),
+        ),
+      );
+
+      if (!graded.approved) {
+        return ok({
+          completed: false,
+          reason: graded.reason,
+          completeness: { status: "full" as const },
+        });
+      }
+      const verdict = graded.verdict;
+
+      // ── APPROVED — and ONLY now. ────────────────────────────────────────
+      const periodKeyStr =
+        activity.period_key === null ? null : String(activity.period_key);
+      let partitionKey: PartitionKey;
+      try {
+        partitionKey = await encodeCompositePartition(
+          identityId,
+          activityId,
+          step.step_id,
+          periodKeyStr,
+        );
+      } catch {
+        return jsonResponse(422, {
+          error: "invalid_partition",
+          detail: "could not encode a conforming composite partition key",
+          completeness: { status: "full" as const },
+        });
+      }
+
+      const completionEffect = buildCompletionEffect(write.completion, {
+        activity,
+        activityId,
+        identityId,
+        partitionKey,
+        ts: new Date().toISOString() as unknown as RFC3339Date,
+        // One First Light per identity → deterministic nonce → idempotent re-grant.
+        nonce: `firstlight:${identityId}`,
+        sourceType: "first_light_admin_grant",
+        sourceMetadata: {
+          step_id: step.step_id,
+          weight, // metadata only — founding=2 / supporting=1, NOT power
+          cohort,
           grader_construct_slug: verdict.graderConstructSlug,
           verdict_trace_id: verdict.traceId,
         },

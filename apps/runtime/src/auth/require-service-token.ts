@@ -36,8 +36,13 @@ import { createHash, timingSafeEqual } from "node:crypto";
 
 import type { Middleware } from "@hyper/core";
 
-/** The two least-privilege service-token scopes (§1.12). */
-export type ServiceTokenScope = "read" | "verify-write";
+/**
+ * The least-privilege service-token scopes (§1.12). Each is a SEPARATELY-built
+ * gate that knows only its own secret — a token for one scope can never satisfy
+ * another. `admin-grant` is the most privileged (operator hand-picks badge
+ * recipients); it is held only by the operator, never a consumer building.
+ */
+export type ServiceTokenScope = "read" | "verify-write" | "admin-grant";
 
 const SERVICE_TOKEN_HEADER = "x-service-token";
 
@@ -58,13 +63,20 @@ export interface ServiceTokenConfig {
  * resolveServiceTokenConfig — read the scoped secret from env, no hardcoding.
  *   read         → ACTIVITIES_READ_TOKEN
  *   verify-write → ACTIVITIES_VERIFY_WRITE_TOKEN
+ *   admin-grant  → ACTIVITIES_ADMIN_GRANT_TOKEN
  */
+const SCOPE_ENV: Readonly<Record<ServiceTokenScope, string>> = {
+  read: "ACTIVITIES_READ_TOKEN",
+  "verify-write": "ACTIVITIES_VERIFY_WRITE_TOKEN",
+  "admin-grant": "ACTIVITIES_ADMIN_GRANT_TOKEN",
+};
+
 export const resolveServiceTokenConfig = (
   scope: ServiceTokenScope,
   env: Record<string, string | undefined> = process.env,
 ): ServiceTokenConfig => ({
   scope,
-  secret: scope === "read" ? env.ACTIVITIES_READ_TOKEN : env.ACTIVITIES_VERIFY_WRITE_TOKEN,
+  secret: env[SCOPE_ENV[scope]],
 });
 
 const unauthorized401 = (code: string): Response =>
