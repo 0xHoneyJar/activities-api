@@ -14,7 +14,7 @@ export { ActivityId } from "./ActivityId.js";
 export { CosmeticId } from "./CosmeticId.js";
 export { CycleId } from "./CycleId.js";
 export { EventId } from "./EventId.js";
-export { IdentityId } from "./IdentityId.js";
+export { IdentityId, spineUserIdToIdentityId } from "./IdentityId.js";
 export { MintIntentId } from "./MintIntentId.js";
 export { PartitionKey, PartitionScope } from "./PartitionKey.js";
 export { PartnerId } from "./PartnerId.js";
