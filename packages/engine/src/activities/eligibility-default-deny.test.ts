@@ -25,9 +25,12 @@
  * (ActivityStep.ts) on the interactive path (no `merkleGrant` context) and
  * asserts that exactly ONE shape — `ManualCurator { curator_id: "verify" }` —
  * yields APPROVED, and EVERY other shape yields a non-APPROVED, schema-valid
- * verdict. If a 7th variant is added to the union (CL-Step-1 requires an
- * /architect cycle), this table must gain a row — making the gate decision for
- * the new method an explicit, reviewed choice rather than a silent fall-through.
+ * verdict. The coverage tripwire (`REQUIRED_TAGS`) is grounded against the
+ * `VerificationMethod["_tag"]` type, so it is real two ways: a 7th union variant
+ * (CL-Step-1 requires an /architect cycle) breaks the `satisfies` at COMPILE
+ * time, and a declared tag with no row in the `VARIANTS` table breaks the
+ * runtime loop — either way, the gate decision for a new method must be an
+ * explicit, reviewed choice rather than a silent fall-through.
  *
  * Pure Effect — no Postgres, no HTTP, no route. This is a Plane-2 invariant
  * test; the route-level "non-APPROVED cannot grant" regression lives in
@@ -155,21 +158,39 @@ const evalVariant = (v: (typeof VARIANTS)[number]): SubstrateStepVerdict => {
   );
 };
 
+/**
+ * REQUIRED_TAGS — the coverage tripwire, grounded against the SOURCE type.
+ *
+ * `satisfies Record<VerificationMethod["_tag"], true>` makes this a COMPILE-time
+ * mirror of the sealed union (ActivityStep.ts:85-94): add a 7th variant to
+ * `VerificationMethod` and this object no longer satisfies the Record → tsc
+ * fails until the new tag is listed here. The runtime loop below then fails
+ * until that tag also has a row in `VARIANTS`. Both halves are needed because a
+ * single ManualCurator tag carries TWO rows (verify→approve, moderator→deny),
+ * so `VARIANTS` cannot be keyed by `_tag` directly (duplicate key) — the table
+ * stays an array for `it.each`, and this map is the separate exhaustiveness key.
+ */
+const REQUIRED_TAGS = {
+  ManualCurator: true,
+  SignedMemoTx: true,
+  MerkleProof: true,
+  WebhookHmac: true,
+  PartnerApi: true,
+  OnChainEvent: true,
+} satisfies Record<VerificationMethod["_tag"], true>;
+
 describe("evaluateEligibility — exhaustive default-deny across all VerificationMethod variants (GATE-SEC-1 · OQ-4)", () => {
   it("covers EVERY VerificationMethod variant in the sealed union (no shape is untested)", () => {
     const covered = new Set(VARIANTS.map((v) => v.verification._tag));
-    // The 6 variants of the sealed union (ActivityStep.ts). If a 7th is added,
-    // this assertion fails until a row (with its gate decision) is added above.
-    expect([...covered].sort()).toEqual(
-      [
-        "ManualCurator",
-        "MerkleProof",
-        "OnChainEvent",
-        "PartnerApi",
-        "SignedMemoTx",
-        "WebhookHmac",
-      ].sort(),
-    );
+    // Every tag the SOURCE type declares (REQUIRED_TAGS is compile-pinned to
+    // VerificationMethod["_tag"]) must have at least one VARIANTS row. A new
+    // union variant fails the `satisfies` at compile time; a declared tag with
+    // no row fails here at runtime.
+    for (const tag of Object.keys(REQUIRED_TAGS) as Array<
+      VerificationMethod["_tag"]
+    >) {
+      expect(covered.has(tag)).toBe(true);
+    }
   });
 
   it.each(VARIANTS)(
