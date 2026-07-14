@@ -1,0 +1,64 @@
+{
+  "$schema": "https://raw.githubusercontent.com/0xHoneyJar/loa-freeside/177a57a4fdb18c071b4f82f7560ca705b5807a1c/spec/product/system-component.schema.json",
+  "schema_version": "1.0",
+  "component_id": "activities-api",
+  "repository": "github:0xHoneyJar/activities-api",
+  "layer": "building",
+  "operator": {
+    "role": "Freeside systems component engineer",
+    "job": "Integrate member activity and contribution evidence into a BFF without importing quest-engine internals."
+  },
+  "object": {
+    "kind": "system-component",
+    "description": "The quest and engagement building for missions, completions, badges, raffles, and contribution artifacts."
+  },
+  "question": "What has this member completed or contributed inside the community, and which durable artifacts support that claim?",
+  "responsibility": "Own sealed activity, quest, completion, badge, and raffle contracts plus query surfaces that consumers can compose.",
+  "consumers": [
+    {
+      "name": "loa-freeside",
+      "need": "Typed activity evidence that can be composed with identity and holdings."
+    },
+    {
+      "name": "freeside-dashboard",
+      "need": "Fact-level member contribution and completion context without quest-engine logic in the UI."
+    }
+  ],
+  "trust": {
+    "contract_status": "declared",
+    "contract_refs": [
+      "file:packages/protocol/README.md",
+      "file:packages/protocol/src/index.ts"
+    ],
+    "evidence_refs": [
+      "file:README.md"
+    ],
+    "note": "Sealed protocol types and typed ports define the building boundary; a consuming BFF still owns source freshness and cross-building joins."
+  },
+  "actions": [
+    "inspect",
+    "query",
+    "attribute",
+    "export"
+  ],
+  "boundaries": {
+    "owns": [
+      "Quest, mission, completion, badge, raffle, and contribution artifact semantics.",
+      "Typed activity evidence returned to consuming systems."
+    ],
+    "does_not_own": [
+      "Canonical member identity or wallet linking.",
+      "Conviction scoring, cohort policy, or campaign selection.",
+      "The product surface that explains a contribution to a community manager."
+    ],
+    "missing_capability_handoff": "Request a typed activity port or protocol addition; do not reconstruct completion semantics in the BFF or dashboard."
+  },
+  "flow_moments": [
+    {
+      "flow_moment_id": "FM-AUDIT-COMPOSITION",
+      "canonical_ref": "flow:FM-AUDIT-COMPOSITION",
+      "role": "producer",
+      "contribution": "Produce member activity, completion, badge, and contribution facts that support composition and movement receipts."
+    }
+  ]
+}
