@@ -37,3 +37,6 @@ Thumbs.db
 .claude/checksums.json
 .loa-state/
 .claude.backup.*
+
+# bv (beads viewer) local config and caches
+.bv/
